@@ -1,0 +1,1027 @@
+# WL_ReAssign
+
+import PT_WF_WORKLIST:*;
+import PT_WF_NOTIFICATION:*;
+
+class WorkListMaintenance
+   /*============[	METHODS USED TO INVOKE WORKLIST REASSIGNMENT PROCESS ]============*/
+   
+   method WorkListMaintenance(&UL_GRP As string, &UL_EMP As string);
+   method findULchanges();
+   
+   /*============[	Userlist snapshot for Comparison  ]============*/
+   
+   property Rowset Rs_UL_Mbrs_Old;
+   property Rowset Rs_UL_Mbrs_New;
+   
+   property string Task;
+   property string Person;
+   
+private
+   
+   instance string &WL_Next_Rolename;
+   
+   instance string &WorklistURL;
+   instance string &SSO_URL;
+   
+   instance array of string &Open_WLs_DTLS;
+   instance array of string &Inflight_WLs_DTLS;
+   
+   instance array of string &Prcsd_RoleNames;
+   
+   /*============[	DEBUGGING PARAMETER VALUES  ]============*/
+   
+   instance boolean &verbrose;
+   instance boolean &debug;
+   instance number &Max_WL_Links;
+
+   instance File &logfile;
+   
+   /*============[	ARRAY INDEX VALUES  ]============*/
+   
+   Constant &OPRID = 1;
+   Constant &DEPTID = 2;
+   Constant &ROLENAME = 3;
+   
+   Constant &BUSPROCNAME = 1;
+   Constant &ACTIVITYNAME = 2;
+   Constant &EVENTNAME = 3;
+   Constant &WORKLISTNAME = 4;
+   Constant &EMPLID = 5;
+   Constant &EMPL_RCD = 6;
+   Constant &CONTRACT_NUM = 7;
+   
+   /*============[	Worklist Administrator ID  ]============*/
+   
+   Constant &WL_Admin_Oprid = "UOA_WFADMIN";
+   Constant &WL_ReAssign_ID = "WL_ReAssign";
+   
+   /*============[	METHODS USED TO FIND USERLIST CHANGES  ]============*/
+   
+   /*============[	METHODS USED TO FIND USERLIST CHANGES  ]============*/
+   
+   method CompareAndProcess(&Action As string);
+   method CompareFields(&recA As Record, &recB As Record) Returns boolean;
+   
+   /*============[	METHODS USED FOR FORM WORKLIST PROCESSING  ]============*/
+   
+   method processInflightWLItems(&Action As string, &UL_Info As array of any);
+   
+   /*============[	METHODS USED FOR REVIEW WORKLIST PROCESSING  ]============*/
+   
+   method processOpenWLItems(&Action As string, &UL_Info As array of any);
+   
+   /*============[	METHODS USED FOR FORM WORKLIST PROCESSING  ]============*/
+   
+   method DeActivateFormWLTask(&UL_Info As array of any, &G_Form As array of any);
+   method CancelFormWL(&pTo As string, &WL_Params As array of any) Returns boolean;
+   
+   method TriggerFormWLTask(&UL_Info As array of any, &G_Form As array of any);
+   method SendFormWL(&pTo As string, &WL_Params As array of any);
+   
+   /*============[	METHODS USED FOR REVIEW WORKLIST PROCESSING  ]============*/
+   
+   method DeActivateReviewWL(&UL_Info As array of any, &G_Form As array of any);
+   method CancelReviewWL(&pTo As string, &WL_Params As array of any) Returns boolean;
+   
+   method TriggerReviewWL(&UL_Info As array of any, &G_Form As array of any);
+   method SendReviewWL(&pTo As string, &Recname As string, &WL_Params As array of any);
+   
+   /*===========[	METHODS USED FOR EMAIL NOTIFICATION  ]===========*/
+   
+   method SendEmailNotification(&pTo As string);
+   
+   method PrepareWLEmailDetails(&mode As string, &arr_WLs_DTLS As array of string, &in_arg As string, &in_URL As string);
+   method SetupWorklistParams(&aryValues As array of string) Returns string;
+   
+   /*===========[	METHOD FOR WFA WL CLEANUP  ]===========*/
+   
+   method CleanUpWFAdminWL();
+   
+   /*===========[	METHODS USED FOR LOGGING & DEBUGGING PROCESSING  ]===========*/
+   
+   method msglog(&msg As string);
+   
+end-class;
+
+/*>>>>>>>>>>>>>>>>>>>>>>>>>*/
+
+Declare Function CleanseSplChars PeopleCode CFG_WLR_WRK_UOA.HYPERLINK FieldFormula;
+
+Global number &WL_Link_CNT;
+
+/*<<<<<<<<<<<<<<<<<<<<<<<<<*/
+
+/*
+=============================================================================================
+DESCRIPTION: 	Constructor method for initialising process parameters 
+CALLED FROM:	Userlist page SavePostChange 
+				Userlist Maintenance Application engine
+=============================================================================================
+*/
+
+method WorkListMaintenance
+   /+ &UL_GRP as String, +/
+   /+ &UL_EMP as String +/
+   
+   &WL_Link_CNT = 0;
+
+   /*--[ Initialise Process Parameters ]--*/
+   
+   %This.Task = &UL_GRP;
+   %This.Person = &UL_EMP;
+   
+   Local string &role;
+   SQLExec(SQL.ULMNT_GET_G_NEXT_ROLENAME_UOA, &Task, &role);
+   
+   %This.WL_Next_Rolename = &role;
+   
+   /*--[ Initialise Debugging Options ]--*/
+   
+   Local string &dbug_flg, &prompt_flg;
+   Local number &Num_WL_Links;
+
+   SQLExec(SQL.ULMNT_DEBUG_VERBROSE_FLAG_UOA, &dbug_flg, &prompt_flg, &Num_WL_Links);
+   
+   &debug = False;
+   &verbrose = False;
+   
+   If &dbug_flg = "Y" Then
+      &debug = True;
+   End-If;
+   
+   If &prompt_flg = "Y" Then
+      &verbrose = True;
+   End-If;
+   
+   &Max_WL_Links = &Num_WL_Links;
+   
+   
+   If &debug Then
+      &logfile = GetFile(&Task | &Person | "_WL_Reassign_" | %Datetime | ".log", "W");
+      %This.msglog("Initialised at : " | %Datetime);
+   End-If;
+   
+   /*--[ Prepare Email Notification Parameters] --*/
+   
+   %This.WorklistURL = EncodeURL(GenerateComponentPortalURL(Portal.EMPLOYEE, Node.HRMS, MenuName.WORKLIST, "GBL", Component.WORKLIST, Page.WORKLIST, ""));
+   %This.SSO_URL = GetURL(URL.SSO_LINK_UOA);
+   
+   %This.Open_WLs_DTLS = CreateArrayRept("", 0);
+   %This.Inflight_WLs_DTLS = CreateArrayRept("", 0);
+   
+   %This.Prcsd_RoleNames = CreateArrayRept("", 0);
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Method to invoke the Worklist ReAssignment processing 
+CALLED FROM:	Child Classes WorkListMaintenanceByTask & WorkListMaintenanceByPerson
+=============================================================================================
+*/
+
+method findULchanges
+   
+   %This.msglog("Processing Started at : " | %Datetime);
+   
+   /* Compare */
+   
+   %This.CompareAndProcess("Deleted");
+   %This.CompareAndProcess("New");
+   
+   %This.CleanUpWFAdminWL();
+
+   %This.msglog("Processing Ended at : " | %Datetime);
+   
+   If %ContentType = "c" And
+         &verbrose Then
+      REM Error "Rolling back the processing for debugging ! !";
+   End-If;
+   
+   If &debug Then
+      &logfile.Close();
+   End-If;
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for identifying changes to Userlist
+CALLED FROM:	'findULchanges' method
+=============================================================================================
+*/
+
+method CompareAndProcess
+   /+ &Action as String +/
+   
+   Local Rowset &RS_UL_From, &RS_UL_With;
+   Local number &i, &j;
+   Local Record &rec_from, &rec_with;
+   Local boolean &found;
+   
+   /*=====[ CHOOSE ORIENTATION OF PROCESSING ]=====*/
+   
+   If &Action = "Deleted" Then
+      &RS_UL_From = &Rs_UL_Mbrs_Old;
+      &RS_UL_With = &Rs_UL_Mbrs_New;
+   Else
+      &RS_UL_From = &Rs_UL_Mbrs_New;
+      &RS_UL_With = &Rs_UL_Mbrs_Old;
+   End-If;
+   
+   /*=====[ COMPARE AND PROCESS ]=====*/
+   
+   For &i = 1 To &RS_UL_From.RowCount
+      
+      &rec_from = &RS_UL_From(&i).UL_MEMBERS_UOA;
+      
+      /*--[ Scan for Changes in the Userlist ]--*/
+      
+      &found = False;
+      
+      For &j = 1 To &RS_UL_With.RowCount
+         
+         &rec_with = &RS_UL_With(&j).UL_MEMBERS_UOA;
+         
+         If %This.CompareFields(&rec_from, &rec_with) Then
+            &found = True;
+            Break;
+         End-If;
+         
+      End-For;
+      
+      /*---[ A change in Userlist for an OPRID/EMPLID has been detected ]---*/
+      
+      If Not &found Then
+         
+         <* {{{ >>> COMMENTED TO HANDLE MULTIPLE ROLES LINKED TO A USERLIST <<< }}}	       
+
+         /*--[ If in Person mode then ]--*/
+         If %This.Person <> "" And
+               %This.Task = "" Then
+            
+            Local string &role;
+            
+            SQLExec(SQL.ULMNT_GET_G_NEXT_ROLENAME_UOA, &rec_from.UL_GRP_UOA.Value, &role);
+            
+            %This.WL_Next_Rolename = &role;
+            
+         End-If;
+         *>
+         
+         /*--[>> HANDLE MULTIPLE ROLES LINKED TO A USERLIST <<]--*/
+         
+         Local string &role;
+         Local SQL &UL_Role = GetSQL(SQL.ULMNT_GET_G_NEXT_ROLENAME_UOA, &rec_from.UL_GRP_UOA.Value);
+         
+         While &UL_Role.Fetch(&role);
+            
+            %This.WL_Next_Rolename = &role;
+            
+            /*--[ If a UserList Task to Role mappping exists then ]--*/
+            
+            If %This.WL_Next_Rolename <> "" Then
+               
+               /*--[ Prepare an array of Parameters for processing ]--*/
+               
+               Local array of any &UL_Info = CreateArrayAny();
+               
+               &UL_Info.Push(&rec_from.OPRID.Value);
+               &UL_Info.Push(&rec_from.AREA_RESP_UOA.Value);
+               &UL_Info.Push(&WL_Next_Rolename);
+               
+               %This.msglog("Action: " | &Action | " - UL Info: " | &UL_Info.Join(","));
+               
+               %This.processInflightWLItems(&Action, &UL_Info);
+               
+               %This.processOpenWLItems(&Action, &UL_Info);
+               
+               /****************************************/
+               If &Prcsd_RoleNames.Find(&role) = 0 Then
+                  &Prcsd_RoleNames.Push(&role);
+               End-If;
+               REM %This.CleanUpWFAdminWL();
+               /****************************************/
+               
+            End-If; /*  If %This.WL_Next_Rolename <> "" Then */
+            
+         End-While; /* HANDLE MULTIPLE ROLES LINKED TO A USERLIST */
+         
+      End-If; /* If Not &found Then */
+      
+      /*---[ Send Email Notification ]---*/
+      
+      If &Action = "New" Then
+         
+         If &i = &RS_UL_From.RowCount Or
+               (&i < &RS_UL_From.RowCount And
+                  &RS_UL_From(&i + 1).UL_MEMBERS_UOA.OPRID.Value <> &rec_from.OPRID.Value) Then
+            
+            If &Open_WLs_DTLS.Len > 0 Or
+                  &Inflight_WLs_DTLS.Len > 0 Then
+               
+               %This.SendEmailNotification(&rec_from.EMPLID.Value);
+               
+            End-If;
+            
+            /*--[ Reset the email WL counter on OPRID change ]--*/
+            &WL_Link_CNT = 0;
+
+         End-If;
+         
+      End-If; /* If &Action = "New" Then */
+      
+   End-For;
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for COMPARING Userlist records to find a changes.
+CALLED FROM:	'CompareAndProcess' method
+=============================================================================================
+*/
+
+method CompareFields
+   /+ &recA as Record, +/
+   /+ &recB as Record +/
+   /+ Returns Boolean +/
+   
+   If &recA.EMPLID.Value = &recB.EMPLID.Value And
+         &recA.UL_GRP_UOA.Value = &recB.UL_GRP_UOA.Value And
+         &recA.AREA_RESP_UOA.Value = &recB.AREA_RESP_UOA.Value Then
+      Return True;
+   Else
+      Return False;
+   End-If;
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for processing Inflgiht Worklist for identified OPRID / DEPTID
+CALLED FROM:	'CompareAndProcess' method
+=============================================================================================
+*/
+
+method processInflightWLItems
+   /+ &Action as String, +/
+   /+ &UL_Info as Array of Any +/
+   
+   Local array of any &G_Forminfo = CreateArrayAny();
+   
+   /*---[ Process Form Tasks affected by the change in UserList ]---*/
+   
+   Local SQL &forminfo = GetSQL(SQL.ULMAINT_WL_FORM_RECNAME_UOA, &WL_Next_Rolename);
+   
+   While &forminfo.Fetch(&G_Forminfo)
+      
+      %This.msglog("Inflight WL Record: " | &G_Forminfo [1]);
+      
+      If &Action = "Deleted" Then
+         %This.DeActivateFormWLTask(&UL_Info, &G_Forminfo);
+      Else
+         If &Action = "New" Then
+            %This.TriggerFormWLTask(&UL_Info, &G_Forminfo);
+         End-If;
+      End-If;
+      
+   End-While;
+   
+   &forminfo.Close();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for removing/cancelling Inflgiht Worklist for identified OPRID
+CALLED FROM:	'processInflightWLItems' method
+=============================================================================================
+*/
+
+method DeActivateFormWLTask
+   /+ &UL_Info as Array of Any, +/
+   /+ &G_Form as Array of Any +/
+   
+   Local array of any &UL = &UL_Info.Clone();
+   
+   Local Record &rec = CreateRecord(@("RECORD." | &G_Form.Shift()));
+   
+   Local SQL &sql = GetSQL(SQL.ULMNT_REMOVE_WL_TASK_UOA, &UL [&OPRID], &UL [&DEPTID], &UL [&ROLENAME], &rec, &G_Form [&BUSPROCNAME], &G_Form [&ACTIVITYNAME], &G_Form [&EVENTNAME], &G_Form [&WORKLISTNAME]);
+   
+   Local array of any &datarow = CreateArrayAny();
+   
+   Local string &WL_Oprid = &UL.Shift();
+   
+   While &sql.Fetch(&datarow)
+      %This.msglog(" > Worklist Info: " | &datarow.Join(","));
+      
+      If %This.CancelFormWL(&WL_Oprid, &datarow) Then
+         %This.msglog(" > > Cancelled Successfully");
+      Else
+         %This.msglog(" > > Cancellation Failed ! !");
+      End-If;
+   End-While;
+   
+   &sql.Close();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for cancelling/reassigning Worklist for identified OPRID
+CALLED FROM:	'DeActivateFormWLTask' method
+=============================================================================================
+*/
+
+method CancelFormWL
+   /+ &pTo as String, +/
+   /+ &WL_Params as Array of Any +/
+   /+ Returns Boolean +/
+   
+   Local number &WL_Cnt;
+   
+   SQLExec(SQL.ULMNT_COUNT_GFORM_WL_UOA, &WL_Params, &WL_Cnt);
+   
+   Local number &i;
+   Local Record &WL_rec, &WL_SUBREC;
+   
+   &WL_SUBREC = CreateRecord(Record.CFG_WL_SUBR_UOA);
+   &WL_rec = CreateRecord(Record.PSWORKLIST);
+   
+   For &i = 1 To &WL_SUBREC.FieldCount
+      &WL_rec.GetField(&i).Value = &WL_Params [&i];
+   End-For;
+   
+   &WL_rec.SelectByKey();
+   
+   If &WL_Cnt > 1 Then
+      /* Cancel the Worklist */
+      &WL_rec.INSTSTATUS.Value = 3;
+      &WL_rec.DESCR254_MIXED.Value = "Deactivated by WL_Reassignment";
+   Else
+      /* Reassign it to WF Admin */
+      &WL_rec.OPRID.Value = &WL_Admin_Oprid;
+      &WL_rec.DESCR254_MIXED.Value = "Reassigned by WL_Reassignment";
+   End-If;
+   
+   &WL_rec.LASTUPDDTTM.Value = %Datetime;
+   
+   Return &WL_rec.Update();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for triggering Inflgiht Worklist for identified OPRID
+CALLED FROM:	'processInflightWLItems' method
+=============================================================================================
+*/
+
+method TriggerFormWLTask
+   /+ &UL_Info as Array of Any, +/
+   /+ &G_Form as Array of Any +/
+   
+   Local array of any &UL = &UL_Info.Clone();
+   
+   Local Record &rec = CreateRecord(@("RECORD." | &G_Form.Shift()));
+   
+   Local SQL &sql = GetSQL(SQL.ULMNT_TRIGGER_WL_TASK_UOA, &UL [&OPRID], &UL [&DEPTID], &UL [&ROLENAME], &rec, &G_Form [&BUSPROCNAME], &G_Form [&ACTIVITYNAME], &G_Form [&EVENTNAME], &G_Form [&WORKLISTNAME]);
+   
+   Local array of any &datarow = CreateArrayAny();
+   
+   Local string &WL_Oprid = &UL.Shift();
+   
+   While &sql.Fetch(&datarow)
+      %This.msglog(" > Worklist Info: " | &datarow.Join(","));
+      %This.SendFormWL(&WL_Oprid, &datarow);
+   End-While;
+   
+   &sql.Close();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for triggering Worklist for identified OPRID
+CALLED FROM:	'TriggerFormWLTask' method
+=============================================================================================
+*/
+
+method SendFormWL
+   /+ &pTo as String, +/
+   /+ &WL_Params as Array of Any +/
+   
+   Local PT_WF_WORKLIST:WorklistEntry &Worklist;
+   Local Record &G_Form_WL;
+   
+   If All(&pTo) Then
+      
+      &Worklist = create PT_WF_WORKLIST:WorklistEntry();
+      
+      /*--[ Setting the PSWORKLIST record data ]--*/
+      &Worklist.busprocname = &WL_Params [10];
+      &Worklist.busactivity = &WL_Params [11];
+      &Worklist.buseventname = &WL_Params [12];
+      &Worklist.worklistname = &WL_Params [13];
+      
+      If (&Worklist.Create() <> 0) Then
+         
+         &Worklist.oprid = &pTo;
+         &Worklist.originatorid = &WL_ReAssign_ID;
+         
+         If (&Worklist.Save() <> 0) Then
+            
+            /*--[ Populate Custom Worklist record which is connecetd to PSWORKLIST ]--*/
+            &G_Form_WL = CreateRecord(Record.G_FORM_WL);
+            
+            &G_Form_WL.BUSPROCNAME.Value = &Worklist.busprocname;
+            &G_Form_WL.ACTIVITYNAME.Value = &Worklist.busactivity;
+            &G_Form_WL.EVENTNAME.Value = &Worklist.buseventname;
+            &G_Form_WL.WORKLISTNAME.Value = &Worklist.worklistname;
+            &G_Form_WL.INSTANCEID.Value = &Worklist.instanceid;
+            &G_Form_WL.TRANSACTIONID.Value = &Worklist.transactionid;
+            
+            &G_Form_WL.WORKLIST_URL.Value = &WL_Params [3];
+            &G_Form_WL.WORKLIST_DESCR.Value = &WL_Params [4];
+            &G_Form_WL.G_FORM_ID.Value = &WL_Params [5];
+            &G_Form_WL.APPR_INSTANCE.Value = &WL_Params [6];
+            
+            &G_Form_WL.G_NEXT_TASK.Value = &WL_Params [7];
+            &G_Form_WL.G_NEXT_ROLEUSER.Value = &WL_Params [8];
+            &G_Form_WL.G_NEXT_ROLENAME.Value = &WL_Params [9];
+            
+            If Not &G_Form_WL.Insert() Then
+               %This.msglog(" > > Unable to create G Form Task Worklist");
+            Else
+               %This.PrepareWLEmailDetails("FRM", &Inflight_WLs_DTLS, &WL_Params [5], &G_Form_WL.WORKLIST_URL.Value);
+               %This.msglog(" > > Form Task Worklist triggered successfully !");
+            End-If;
+         Else
+            %This.msglog(" > > Unable to Save Form Task PS Worklist");
+         End-If;
+         
+      Else
+         %This.msglog(" > > Unable to Create Form Task PS Worklist");
+      End-If;
+      
+   End-If;
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for processing Open Worklist for identified OPRID / DEPTID
+CALLED FROM:	'CompareAndProcess' method
+=============================================================================================
+*/
+
+method processOpenWLItems
+   /+ &Action as String, +/
+   /+ &UL_Info as Array of Any +/
+   
+   Local array of any &G_Forminfo = CreateArrayAny();
+   
+   Local SQL &forminfo = GetSQL(SQL.ULMAINT_OPEN_WL_RECNAME_UOA, &WL_Next_Rolename);
+   
+   While &forminfo.Fetch(&G_Forminfo)
+      
+      %This.msglog("Open WL Record: " | &G_Forminfo [1]);
+      
+      If &Action = "Deleted" Then
+         %This.DeActivateReviewWL(&UL_Info, &G_Forminfo);
+      Else
+         If &Action = "New" Then
+            %This.TriggerReviewWL(&UL_Info, &G_Forminfo);
+         End-If;
+      End-If;
+      
+   End-While;
+   
+   &forminfo.Close();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for Cancelling Open Review Worklists
+CALLED FROM:	'processOpenWLItems' method
+=============================================================================================
+*/
+
+method DeActivateReviewWL
+   /+ &UL_Info as Array of Any, +/
+   /+ &G_Form as Array of Any +/
+   
+   Local array of any &UL = &UL_Info.Clone();
+   
+   Local string &Recname = &G_Form.Shift();
+   
+   Local SQL &sql = GetSQL(SQL.ULMNT_REMOVE_RVW_TASK_UOA, &UL [&OPRID], &UL [&DEPTID], &G_Form [&BUSPROCNAME], &G_Form [&ACTIVITYNAME], &G_Form [&EVENTNAME], &G_Form [&WORKLISTNAME]);
+   
+   Local array of any &datarow = CreateArrayAny();
+   
+   Local string &WL_Oprid = &UL.Shift();
+   
+   While &sql.Fetch(&datarow)
+      %This.msglog(" > Worklist Info: " | &datarow.Join(","));
+      
+      If %This.CancelReviewWL(&WL_Oprid, &datarow) Then
+         %This.msglog(" > > Cancelled Successfully");
+      Else
+         %This.msglog(" > > Cancellation Failed ! !");
+      End-If;
+      
+   End-While;
+   
+   &sql.Close();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for Cancelling Open Review Worklist
+CALLED FROM:	'DeActivateReviewWL' method
+=============================================================================================
+*/
+
+method CancelReviewWL
+   /+ &pTo as String, +/
+   /+ &WL_Params as Array of Any +/
+   /+ Returns Boolean +/
+   
+   Local number &WL_Cnt;
+   
+   SQLExec(SQL.ULMNT_COUNT_GFORM_OPEN_WL_UOA, &WL_Params, &WL_Cnt);
+
+   Local number &i;
+   Local Record &WL_rec, &WL_SUBREC;
+   
+   &WL_SUBREC = CreateRecord(Record.CFG_WL_SUBR_UOA);
+   &WL_rec = CreateRecord(Record.PSWORKLIST);
+   
+   For &i = 1 To &WL_SUBREC.FieldCount
+      &WL_rec.GetField(&i).Value = &WL_Params [&i];
+   End-For;
+   
+   &WL_rec.SelectByKey();
+   
+   If &WL_Cnt > 1 Then
+      /* Cancel the Worklist */
+      &WL_rec.INSTSTATUS.Value = 3;
+      &WL_rec.DESCR254_MIXED.Value = "Deactivated by WL_Reassignment";
+   Else
+      /* Reassign it to WF Admin */
+      &WL_rec.OPRID.Value = &WL_Admin_Oprid;
+      &WL_rec.DESCR254_MIXED.Value = "Reassigned by WL_Reassignment";
+   End-If;
+
+   &WL_rec.LASTUPDDTTM.Value = %Datetime;
+   
+   Return &WL_rec.Update();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for Triggering Open Review Worklist
+CALLED FROM:	'processOpenWLItems' method
+=============================================================================================
+*/
+
+method TriggerReviewWL
+   /+ &UL_Info as Array of Any, +/
+   /+ &G_Form as Array of Any +/
+   
+   Local array of any &UL = &UL_Info.Clone();
+   
+   Local string &Recname = &G_Form.Shift();
+   
+   Local SQL &sql = GetSQL(SQL.ULMNT_TRIGGER_RVW_TASK_UOA, &UL [&OPRID], &UL [&DEPTID], &G_Form [&BUSPROCNAME], &G_Form [&ACTIVITYNAME], &G_Form [&EVENTNAME], &G_Form [&WORKLISTNAME]);
+   
+   Local array of any &datarow = CreateArrayAny();
+   
+   Local string &WL_Oprid = &UL.Shift();
+   
+   While &sql.Fetch(&datarow)
+      %This.msglog(" > Worklist Info: " | &datarow.Join(","));
+      %This.SendReviewWL(&WL_Oprid, &Recname, &datarow);
+   End-While;
+   
+   &sql.Close();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for Triggering Open Review Worklist for an OPRID
+CALLED FROM:	'processOpenWLItems' method
+=============================================================================================
+*/
+
+method SendReviewWL
+   /+ &pTo as String, +/
+   /+ &Recname as String, +/
+   /+ &WL_Params as Array of Any +/
+   
+   Local PT_WF_WORKLIST:WorklistEntry &Worklist;
+   
+   &Worklist = create PT_WF_WORKLIST:WorklistEntry();
+   
+   /*--[ Setting the PSWORKLIST record data ]--*/
+   &Worklist.busprocname = &WL_Params [&BUSPROCNAME];
+   &Worklist.busactivity = &WL_Params [&ACTIVITYNAME];
+   &Worklist.buseventname = &WL_Params [&EVENTNAME];
+   &Worklist.worklistname = &WL_Params [&WORKLISTNAME];
+   
+   If &Worklist.Create() <> 0 Then
+      &Worklist.oprid = &pTo;
+      &Worklist.originatorid = &WL_ReAssign_ID;
+      
+      Local Record &WLRec;
+      
+      If &Worklist.Save() <> 0 Then
+         
+         /*--[ Populate Custom Worklist record which is connecetd to PSWORKLIST ]--*/
+         &WLRec = CreateRecord(@("RECORD." | &Recname));
+         
+         &WLRec.BUSPROCNAME.Value = &Worklist.busprocname;
+         &WLRec.ACTIVITYNAME.Value = &Worklist.busactivity;
+         &WLRec.EVENTNAME.Value = &Worklist.buseventname;
+         &WLRec.WORKLISTNAME.Value = &Worklist.worklistname;
+         &WLRec.INSTANCEID.Value = &Worklist.instanceid;
+         &WLRec.TRANSACTIONID.Value = &Worklist.transactionid;
+         
+         &WLRec.EMPLID.Value = &WL_Params [&EMPLID];
+         &WLRec.EMPL_RCD.Value = &WL_Params [&EMPL_RCD];
+         &WLRec.CONTRACT_NUM.Value = &WL_Params [&CONTRACT_NUM];
+         
+         &WL_Params.Push(&WLRec);
+         
+         Local string &G_Form_Task_Descr;
+         
+         SQLExec(SQL.ULMNT_RVW_TASK_URL_DESCR_UOA, &WL_Params, &WLRec.WORKLIST_URL.Value, &WLRec.WORKLIST_DESCR.Value, &G_Form_Task_Descr);
+         
+         If Not (&WLRec.Insert()) Then
+            %This.msglog(" > > Unable to Create Review Task G Worklist");
+         Else
+            %This.PrepareWLEmailDetails("RVW", &Open_WLs_DTLS, &G_Form_Task_Descr | "," | &WL_Params [&EMPLID], &WLRec.WORKLIST_URL.Value);
+            %This.msglog(" > > Review Task Worklist triggered successfully !");
+         End-If;
+      Else
+         %This.msglog(" > > Unable to Save Review Task PS Worklist");
+      End-If;
+   Else
+      %This.msglog(" > > Unable to Create Review Task PS Worklist");
+   End-If;
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for sending Email Notifications for New Worklist items created
+CALLED FROM:	'CompareAndProcess' method
+=============================================================================================
+*/
+
+method SendEmailNotification
+   /+ &pTo as String +/
+   
+   Local array of PT_WF_NOTIFICATION:NotificationAddress &mynotifyto;
+   Local PT_WF_NOTIFICATION:NotificationAddress &mynotifyaddress;
+   Local PT_WF_NOTIFICATION:Notification &mynotification;
+   Local PT_WF_NOTIFICATION:NotificationTemplate &mynotifytemplate;
+   
+   Local string &xmlVars, &inEmailTo, &inGenericTemplate;
+   Local array of string &inParmArray;
+   
+   /*--[ Recipient's email address ]--*/
+   SQLExec(SQL.G_PREF_EMAIL_ADDR_UOA, &pTo, &inEmailTo);
+   
+   &mynotifyto = CreateArrayRept(&mynotifyaddress, 0);
+   &mynotifyaddress = create PT_WF_NOTIFICATION:NotificationAddress("", "", "", &inEmailTo, "Email");
+   &mynotifyto.Push(&mynotifyaddress);
+   
+   /*--[ Specify the email template to be used ]--*/
+   &inGenericTemplate = "ULMAINT_WL_REASSIGN_EMAIL_UOA";
+   &mynotifytemplate = create PT_WF_NOTIFICATION:NotificationTemplate("", "", &inGenericTemplate, "G");
+   
+   /*--[ Load the variables for email text ]--*/
+   &inParmArray = CreateArrayRept("", 0);
+   
+   &inParmArray.Push(%This.WorklistURL); /* Worklist URL*/
+   &Open_WLs_DTLS.Sort("A");
+   &inParmArray.Push(%This.SetupWorklistParams(&Open_WLs_DTLS)); /* Open Worklist */
+   &Inflight_WLs_DTLS.Sort("A");
+   &inParmArray.Push(%This.SetupWorklistParams(&Inflight_WLs_DTLS)); /* Inflight Worklist */
+   &inParmArray.Push(%This.SSO_URL); /* SSO URL*/
+   
+   If &WL_Link_CNT > &Max_WL_Links Then
+      &inParmArray.Push(MsgGetText(30000, 2, "Message not found"));
+   Else
+      &inParmArray.Push("");
+   End-If;
+
+   /*--[ Populate the values needed by the template ]--*/
+   &xmlVars = &mynotifytemplate.SetupGenericVars(&inParmArray);
+   
+   If &mynotifytemplate.GetAndExpandTemplate(%Language, &xmlVars) Then
+      
+      /*--[ At this point, the &mynotifytemplate should have every value resolved ]--*/
+      &mynotification = create PT_WF_NOTIFICATION:Notification(&mynotifytemplate.SenderEmailID, %Datetime, %Language);
+      
+      /*--[ Create email as HTML ]--*/
+      &mynotification.ContentType = "Content-type: text/html; charset=US-ASCII";
+      &mynotification.EmailReplyTo = &mynotifytemplate.SenderEmailID;
+      &mynotification.NotifyTo = &mynotifyto;
+      &mynotification.Subject = &mynotifytemplate.Subject;
+      &mynotification.Message = &mynotifytemplate.Text;
+      
+      &mynotification.Send();
+      
+   End-If;
+   
+   %This.msglog(" > > > Email Notification sent !");
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for formatting the email Worklist hyperlinks
+CALLED FROM:	'SendEmailNotification' method
+=============================================================================================
+*/
+
+method PrepareWLEmailDetails
+   /+ &mode as String, +/
+   /+ &arr_WLs_DTLS as Array of String, +/
+   /+ &in_arg as String, +/
+   /+ &in_URL as String +/
+   
+   Local number &i;
+   Local string &WL_DTL;
+   
+   Local array of string &str_arr = Split(&in_arg, ",");
+   
+   Local array of any &arr_in_arg = CreateArrayAny();
+   
+   For &i = 1 To &str_arr.Len
+      &arr_in_arg.Push(&str_arr [&i]);
+   End-For;
+   
+   Local array of any &arr_out_dtls = CreateArrayAny();
+   
+   If &mode = "FRM" Then /* Inflight Form WL */
+      SQLExec(SQL.ULMNT_REASG_FWL_EMAIL_DTLS_UOA, &arr_in_arg, &arr_out_dtls);
+      &arr_out_dtls [2] = " eform ID: " | &arr_out_dtls [2] | ",";
+   Else
+      If &mode = "RVW" Then /* Open Review WL */
+         SQLExec(SQL.ULMNT_REASG_OWL_EMAIL_DTLS_UOA, &arr_in_arg, &arr_out_dtls);
+      End-If;
+   End-If;
+   
+   /*--[ Remove any Spl Characters ]--*/
+   &arr_out_dtls [4] = CleanseSplChars(&arr_out_dtls [4]);
+   &arr_out_dtls [5] = CleanseSplChars(&arr_out_dtls [5]);
+   
+   &arr_out_dtls.Push(&in_URL);
+   
+   If %ContentType = "c" Then
+      &WL_DTL = GetHTMLText(HTML.ULMNT_REASGN_WL_EMAIL_UOA, &arr_out_dtls [1], &arr_out_dtls [2], &arr_out_dtls [3], &arr_out_dtls [4], &arr_out_dtls [5], &arr_out_dtls [6]);
+   Else
+      &WL_DTL = &arr_out_dtls [1] | "," | &arr_out_dtls [2] | " <a href=" | &arr_out_dtls [6] | ">" | &arr_out_dtls [3] | ": " | &arr_out_dtls [4] | " " | &arr_out_dtls [5] | "</a>";
+   End-If;
+   
+   &arr_WLs_DTLS.Push(&WL_DTL);
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for formatting the email Worklist hyperlinks
+CALLED FROM:	'SendEmailNotification' method
+=============================================================================================
+*/
+
+method SetupWorklistParams
+   /+ &aryValues as Array of String +/
+   /+ Returns String +/
+   
+   Local string &strResult, &str_trash;
+   
+   While &aryValues.Len > 0
+      
+      &WL_Link_CNT = &WL_Link_CNT + 1;
+      
+      If &WL_Link_CNT <= &Max_WL_Links Then
+         &strResult = &strResult | &aryValues.Shift() | "<BR>" | Char(10);
+      Else
+         &str_trash = &aryValues.Shift();
+      End-If;
+
+   End-While;
+   
+   Return &strResult;
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for cancelling WFAdmin Worklist upon Reassignment
+CALLED FROM:	'findULchanges' method
+=============================================================================================
+*/
+
+method CleanUpWFAdminWL
+   
+   Local SQL &sql;
+   Local array of any &datarow;
+   
+   Local number &G_FORM_ID = 7;
+   Local number &G_NEXT_ROLENAME = 8;
+   
+   REM If %This.WL_Next_Rolename <> "" Then;
+   While &Prcsd_RoleNames.Len > 0
+
+      Local string &Prcsd_Role = &Prcsd_RoleNames.Pop();
+      
+      /*######[ INFLIGHT WORKLIST ]######*/
+      
+      REM &sql = GetSQL(SQL.ULMNT_CLEANUP_WFA_FWL_TASK_UOA, &WL_Admin_Oprid, &WL_ReAssign_ID, &WL_Next_Rolename);
+      &sql = GetSQL(SQL.ULMNT_CLEANUP_WFA_FWL_TASK_UOA, &WL_Admin_Oprid, &WL_ReAssign_ID, &Prcsd_Role);
+
+      &datarow = CreateArrayAny();
+      
+      While &sql.Fetch(&datarow)
+         
+         %This.msglog(" > Inflight WFAdmin Worklist Info: " | &datarow.Join(","));
+         
+         If %This.CancelFormWL(&WL_Admin_Oprid, &datarow) Then
+            %This.msglog(" > > Cancelled Successfully");
+            
+            /*--[ Update G_FORMLIST.G_NEXT_ROLENAME if reassigned UOA_WFADMIN worklist ]--*/
+            
+            REM If &datarow [&G_NEXT_ROLENAME] <> &WL_Next_Rolename Then;
+            If &datarow [&G_NEXT_ROLENAME] <> &Prcsd_Role Then
+               REM SQLExec(SQL.ULMNT_UPD_GFL_NXT_ROLENAME_UOA, &datarow [&G_FORM_ID], &datarow [&G_NEXT_ROLENAME], &WL_Next_Rolename);
+               SQLExec(SQL.ULMNT_UPD_GFL_NXT_ROLENAME_UOA, &datarow [&G_FORM_ID], &datarow [&G_NEXT_ROLENAME], &Prcsd_Role);
+            End-If;
+            
+         Else
+            %This.msglog(" > > Cancellation Failed ! !");
+         End-If;
+         
+      End-While;
+      
+      &sql.Close();
+      
+      /*######[ OPEN WORKLIST ]######*/
+      
+      REM &sql = GetSQL(SQL.ULMNT_CLEANUP_WFA_OWL_TASK_UOA, &WL_Admin_Oprid, &WL_ReAssign_ID, &WL_Next_Rolename);
+      &sql = GetSQL(SQL.ULMNT_CLEANUP_WFA_OWL_TASK_UOA, &WL_Admin_Oprid, &WL_ReAssign_ID, &Prcsd_Role);
+
+      &datarow = CreateArrayAny();
+      
+      While &sql.Fetch(&datarow)
+         
+         %This.msglog(" > Open WFAdmin Worklist Info: " | &datarow.Join(","));
+         
+         If %This.CancelReviewWL(&WL_Admin_Oprid, &datarow) Then
+            %This.msglog(" > > Cancelled Successfully");
+         Else
+            %This.msglog(" > > Cancellation Failed ! !");
+         End-If;
+         
+      End-While;
+      
+      &sql.Close();
+      
+      REM End-If;
+   End-While;
+
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private Method for logging processing messages for debugging & tracking
+CALLED FROM:	From various method above
+=============================================================================================
+*/
+
+method msglog
+   /+ &msg as String +/
+   
+   If &debug Then
+      
+      &logfile.WriteLine(&msg);
+      
+      If &verbrose Then
+         MessageBox(0, "", 0, 0, &msg);
+      End-If;
+      
+   End-If;
+   
+end-method;
+
+/*=============================================================================================*/
