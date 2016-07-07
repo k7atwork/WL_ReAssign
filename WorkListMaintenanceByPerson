@@ -1,0 +1,70 @@
+#WL_ReAssign
+
+import USERLISTS_UOA:UserLists:WorkListMaintenance;
+
+class WorkListMaintenanceByPerson extends USERLISTS:UserLists:WorkListMaintenance
+   /*============[	METHODS USED TO INVOKE WORKLIST REASSIGNMENT PROCESS ]============*/
+   
+   method WorkListMaintenanceByPerson(&UL_EMP As string);
+   method findULchanges();
+   
+private
+   
+   /*============[	METHODS USED TO FIND USERLIST CHANGES  ]============*/
+   
+   method getRowsetValues() Returns Rowset;
+   
+end-class;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Constructor method for initialising process parameters 
+CALLED FROM:	WORKFORCE_SYNC --> USERLISTS_UOA:UserLists:LoadMemberTable:LoadMemberTableByPerson() 
+=============================================================================================
+*/
+
+method WorkListMaintenanceByPerson
+   /+ &UL_EMP as String +/
+   
+   %Super = create USERLISTS_UOA:UserLists:WorkListMaintenance("", &UL_EMP);
+   
+   %This.Rs_UL_Mbrs_Old = %This.getRowsetValues();
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Private method to get Userlist values for processing 
+CALLED FROM:	Constructor method 
+				'findULchanges' method
+=============================================================================================
+*/
+
+method getRowsetValues
+   /+ Returns Rowset +/
+   
+   Local Rowset &Rs_UL_Mbrs;
+   
+   &Rs_UL_Mbrs = CreateRowset(Record.UL_MEMBERS_UOA);
+   
+   &Rs_UL_Mbrs.Fill("WHERE EMPLID = :1 AND UL_GRP_UOA <> ' ' AND AREA_RESP_UOA <> ' ' ORDER BY OPRID", %This.Person);
+   
+   Return &Rs_UL_Mbrs;
+   
+end-method;
+
+/*
+=============================================================================================
+DESCRIPTION: 	Method to invoke the Worklist ReAssignment processing 
+CALLED FROM:	WORKFORCE_SYNC --> USERLISTS_UOA:UserLists:LoadMemberTable:LoadMemberTableByPerson()
+=============================================================================================
+*/
+
+method findULchanges
+   /+ Extends/implements USERLISTS_UOA:UserLists:WorkListMaintenance.findULchanges +/
+   
+   %This.Rs_UL_Mbrs_New = %This.getRowsetValues();
+   
+   %Super.findULchanges();
+   
+end-method;
